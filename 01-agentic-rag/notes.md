@@ -84,9 +84,8 @@ An FNN has a layered design:
 ### Key Concepts
 
 **Activation Functions** (introduce non-linearity):
-- **Sigmoid**: \( \sigma(x) = \frac{1}{1+e^{-x}} \)
-- **Tanh**: \( \tanh(x) = \frac{e^x - e^{-x}}{e^x + e^{-x}} \)
-- **ReLU**: \( \text{ReLU}(x) = \max(0, x) \)
+
+![alt text](../assets/image10.png)
 
 **Training Process** (using backpropagation and gradient descent):
 1.  **Forward Propagation**: Input passes through the network to calculate the output.
