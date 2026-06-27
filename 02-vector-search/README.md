@@ -79,11 +79,12 @@ install sentence-transformers. It pulls in PyTorch and is heavy.
 mkdir 02-vector-search
 cd 02-vector-search
 uv init
-uv add requests minsearch openai jupyter python-dotenv
+uv add requests minsearch openai groq jupyter python-dotenv sqlitesearch
 ```
 
 You also need a `.env` file with your API key. 
 
+---
 # Embeddings
 
 Before we can do vector search, we need to turn our text into vectors.
@@ -260,6 +261,8 @@ model maps text to a region of the vector space where most vectors
 have positive components. There's no concept of "opposite meaning"
 that maps to a vector pointing the other way.
 
+---
+
 # Embedding Our Dataset
 
 ## Loading the data
@@ -330,6 +333,7 @@ X = np.array(vectors)
 
 Calling `X.shape` returns (1350, 384) - number of documents vs number of dimensions.
 
+---
 # Vector Search
 
 In the previous lesson we embedded our FAQ dataset into a matrix `X`
@@ -447,3 +451,463 @@ our data.
 
 Doing this by hand with numpy is fine for a small dataset. A larger one
 needs a library that also handles filtering and ranking. 
+
+---
+# Vector Search with minsearch
+
+In the previous section we did vector search by hand with numpy. We
+embedded the query, computed dot products, and found the best matches.
+Writing the argsort and matrix code every time gets old, and it can't
+filter by course. So instead we'll use a library that wraps all of it.
+
+We'll use [minsearch](https://github.com/alexeygrigorev/minsearch), the
+small in-memory search library we already used in module 1 for text
+search. It has a `VectorSearch` class for vector search.
+
+Both classes share the same API:
+
+- `fit` to index data
+- `search` to query
+- `filter_dict` in `search` to filter by keyword
+
+It's the simplest way to get started with vector search.
+
+## Creating the index
+
+We already have our documents and vectors from the previous section.
+
+Index them:
+
+```python
+from minsearch import VectorSearch
+
+vindex = VectorSearch(keyword_fields=["course"])
+vindex.fit(X, documents)
+```
+
+We pass the numpy array `X` with all embeddings and the list of
+documents as payload. The `keyword_fields` parameter works the same as
+in the text `Index`, so we can filter by course later.
+
+## Searching
+
+Let's search for a question:
+
+```python
+query = "I just discovered the course. Can I still join it?"
+query_vector = model.encode(query)
+
+results = vindex.search(query_vector, num_results=5)
+```
+
+Under the hood it does the same thing we just did by hand. It computes
+the dot product between each vector (after filtering) and our query
+vector.
+
+Look at the top result:
+
+```python
+results[0]
+```
+
+It should return the document about joining the course late:
+
+## Filtering by course
+
+Like the text index, we can filter by keyword fields. This matters for
+user experience. A student in LLM Zoom Camp doesn't care about answers
+from the data engineering course. So we narrow to their course first,
+then score only within it.
+
+Pass a `filter_dict`:
+
+```python
+results = vindex.search(
+    query_vector,
+    filter_dict={"course": "llm-zoomcamp"},
+    num_results=5
+)
+```
+
+Now that we can run vector search, let's use it in RAG.
+
+---
+# RAG with Vector Search
+
+In module 1, we built a RAG pipeline with three steps:
+
+```python
+def rag(question):
+    search_results = search(question)
+    user_prompt = build_prompt(question, search_results)
+    return llm(user_prompt)
+```
+
+The search step used keyword search. Now we swap in vector search.
+Because RAG is modular, search is the only step we touch. Build prompt
+and the LLM call stay exactly as they were.
+
+## Using RAGBase
+
+In [module 1](../01-agentic-rag/) we put all the RAG logic into a
+[`RAGBase`](../01-agentic-rag/code/rag_helper.py) helper class. It
+has `search`, `build_prompt`, and `llm` methods, so we only need to
+override `search`.
+
+Download `rag_helper.py` into your project
+
+
+First, create the Groq client:
+
+```python
+from dotenv import load_dotenv
+from groq import Groq
+import os
+load_dotenv()
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+```
+
+Next, download and index the data:
+
+```python
+from ingest import load_faq_data, build_index
+
+documents = load_faq_data()
+index = build_index(documents)
+```
+
+Then use the `RAGBase` class:
+
+```python
+from rag_helper import RAGBase
+
+assistant = RAGBase(
+    index=index,
+    llm_client=client,
+)
+```
+
+Ask it a question:
+
+```python
+query = "I just found out about the program, can I still sign up?"
+assistant.rag(query)
+```
+
+This still uses keyword search. Text search isn't bad here, so the
+answer may already look right. Next we replace search with vector
+search.
+
+We already have:
+
+- All the indexed documents `documents`
+- The embeddings matrix `X` with all these documents
+- The vector search engine `vindex`
+
+We can't pass `vindex` to RAG as-is. Text search takes the query string
+directly, but vector search needs the query as a vector first. So we 
+subclass `RAGBase` and override `search` to encode the query before
+searching.
+
+The subclass overrides `search`:
+
+```python
+
+class RAGVector(RAGBase):
+
+    def __init__(self, embedder, **kwargs):
+        super().__init__(**kwargs)
+        self.embedder = embedder
+
+    def search(self, query, num_results=5):
+        query_vector = self.embedder.encode(query)
+        filter_dict = {"course": self.course}
+
+        return self.index.search(
+            query_vector,
+            num_results=num_results,
+            filter_dict=filter_dict
+        )
+```
+
+The `__init__` method adds one extra argument, `embedder`, for the
+sentence transformer. Inside `search` we use it to turn the query into a
+vector. Then we query `vindex` with that vector instead of the raw text.
+Everything else is inherited from `RAGBase`.
+
+## Using it
+
+Let's init it:
+
+```python
+vector_assistant = RAGVector(
+    embedder=model,
+    index=vindex,
+    llm_client=openai_client,
+)
+```
+
+Try it with different queries:
+
+```python
+vector_assistant.rag("the program has already begun, can I still sign up?")
+```
+
+The answers should be close to what we got with keyword search, but
+vector search handles rephrased questions better. The swap was trivial
+because RAG has three clear steps. The same trick lets us change the LLM
+provider later by overriding just the `llm` step.
+
+---
+
+# Vector Search with sqlitesearch
+
+In the previous section we used minsearch for vector search.
+
+It works, but it has three problems:
+
+- It rebuilds the index on every startup
+- It keeps everything in memory
+- It searches by brute force
+
+
+With text search we never felt these. Indexing was fast because we
+didn't embed anything. With vector search, indexing runs a neural
+network over every document, so it takes a minute on our dataset.
+Keeping everything in memory is fine here, but a larger dataset would
+need too much space.
+
+The third problem is brute-force search. For every query we compare the
+query vector against every single document. With 1,000 documents this is
+fine, probably even faster than anything smarter. But as the dataset
+grows past 10,000 or so, it gets slow, and we'll want an approximate
+method instead.
+
+What we've done so far is exact nearest neighbor (NN) search. We score
+the query against every document and pick the top ones. It always finds
+the true top matches, but it pays for that by touching everything.
+
+Approximate nearest neighbor (ANN) search takes a shortcut. Instead of
+comparing against everything, it first narrows down to a region of
+likely matches. Then it scores only within that region. It may miss the
+absolute best match, but the results are still good and it's much
+faster.
+
+```text
+NN (exact):    compare query against ALL documents -> top 5
+ANN (approx):  narrow down to a region -> compare within region -> top 5
+```
+
+## sqlitesearch
+
+sqlitesearch is the persistent sibling of minsearch, and it solves both
+problems at once.
+
+We already used it in module 1 for persistent text search. It also does
+vector search through its `VectorSearchIndex` class. It stores vectors
+in SQLite, a real on-disk database, and uses ANN strategies for
+retrieval. Because the data lives on disk, one process can write the
+vectors and another can read them back.
+
+
+## Creating the index
+
+Initialize it:
+
+```python
+from sqlitesearch import VectorSearchIndex
+
+vs_index = VectorSearchIndex(
+    keyword_fields=["course"],
+    mode="ivf",
+    db_path="faq_vectors2.db"
+)
+```
+
+sqlitesearch supports three ANN modes:
+
+- `lsh` (default): up to 100K vectors, random hyperplane projections
+- `ivf`: 10K-500K vectors, K-means clustering
+- `hnsw`: 10K-1M+ vectors, proximity graph (highest recall)
+
+For our small dataset, `lsh` is fine. All modes use two-phase search:
+approximate candidate retrieval, then exact cosine similarity
+reranking.
+
+## Indexing the data
+
+Fit the index with our vectors and documents:
+
+```python
+vs_index.fit(vectors, documents)
+```
+
+The index is saved to `faq_vectors2.db`. Unlike minsearch, this file
+persists on disk. You can search immediately after indexing, or reopen
+the index later without re-indexing.
+
+## Searching
+
+Search works the same way as with minsearch. We always encode the query
+into a vector first. This is one thing that makes vector search heavier
+than text search. With text search we'd throw the raw query straight at
+the engine.
+
+Encode, then search:
+
+```python
+query = "I just discovered the course. Can I still join it?"
+query_vector = model.encode(query)
+
+results = vs_index.search(query_vector, num_results=5)
+```
+
+Look at the results:
+
+```python
+results
+```
+
+## Filtering by course
+
+Filtering works the same way:
+
+```python
+results = vs_index.search(
+    query_vector,
+    filter_dict={"course": "llm-zoomcamp"},
+    num_results=5
+)
+```
+
+## Closing the connection
+
+When you're done with the index:
+
+```python
+vs_index.close()
+```
+
+
+## Reopening the index
+
+In a new Python session, you can reopen the index without re-computing
+embeddings:
+
+```python
+from sentence_transformers import SentenceTransformer
+from sqlitesearch import VectorSearchIndex
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+vs_index = VectorSearchIndex(
+    keyword_fields=["course"],
+    mode="ivf",
+    db_path="faq_vectors2.db"
+)
+```
+
+Now we can search:
+
+```python
+query_vector = model.encode("How do I run Kafka?")
+results = vs_index.search(query_vector, num_results=5)
+```
+
+We still load the embedding model to encode the query, but we don't
+re-embed all the documents. No `fit` call needed, because the index is
+already built and waiting on disk.
+
+This is the same two-process split we used for text search in module 1.
+One process ingests and builds the index, another queries it.
+
+It matters more here than with text search. Embedding the whole dataset
+takes about a minute. We don't want a user waiting that long when the
+app starts up. We pay that cost once during ingestion, and the query
+side starts up instantly.
+
+## Using sqlitesearch vector search in RAG
+
+Let's use our persistent vector index in RAG.
+
+In a new notebook, set up the model and open the index (same as
+the "Reopening the index" section above):
+
+```python
+from sentence_transformers import SentenceTransformer
+from sqlitesearch import VectorSearchIndex
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+vs_index = VectorSearchIndex(
+    keyword_fields=["course"],
+    mode="ivf",
+    db_path="faq_vectors2.db"
+)
+```
+
+We'll use the `RAGVector` class. It overrides the `search` method
+to embed the query and use vector search.
+
+Set up the GROQ client and create the assistant:
+
+```python
+from rag_helper import RAGBase
+from dotenv import load_dotenv
+from groq import Groq
+import os
+
+load_dotenv()
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+
+class RAGVector(RAGBase):
+
+    def __init__(self, embedder, **kwargs):
+        super().__init__(**kwargs)
+        self.embedder = embedder
+
+    def search(self, query, num_results=5):
+        query_vector = self.embedder.encode(query)
+        filter_dict = {"course": self.course}
+
+        return self.index.search(
+            query_vector,
+            num_results=num_results,
+            filter_dict=filter_dict
+        )
+
+vector_assistant = RAGVector(
+    embedder=model,
+    index=vs_index,
+    llm_client=openai_client,
+)
+```
+
+Try it:
+
+```python
+vector_assistant.rag("the program has already begun, can I still sign up?")
+```
+
+When you're done, close the connection:
+
+```python
+vs_index.close()
+```
+
+## Comparing minsearch and sqlitesearch for vector search
+
+Here is how the two compare:
+
+- minsearch `VectorSearch`: in-memory (numpy), exact cosine similarity,
+  must re-compute embeddings on startup, good for experiments and
+  notebooks
+- sqlitesearch `VectorSearchIndex`: persistent (SQLite `.db` file), ANN
+  (LSH/IVF/HNSW) with exact rerank, can open an existing index, good
+  for projects and persistence
+
+Its only dependencies are SQLite and numpy. So it runs on any host that 
+offers a free SQLite database, where a dedicated vector database would cost 
+extra.
+
