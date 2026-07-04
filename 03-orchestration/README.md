@@ -224,20 +224,6 @@ RAG (Retrieval Augmented Generation) is a technique that retrieves relevant info
 
 RAG has two phases. In the demo flows below they run back-to-back, but in production you'd typically schedule them separately — ingest on a cadence, query on demand.
 
-```mermaid
-graph LR
-    subgraph Ingest ["Ingest (run once / on schedule)"]
-        A[Fetch Docs] --> B[Create Embeddings]
-        B --> C[Store in KV Store]
-    end
-    subgraph Query ["Query (run on demand)"]
-        D[User Question] --> E[Find Similar Content]
-        E --> F[Add Context to Prompt]
-        F --> G[LLM Answer]
-    end
-    C --> E
-```
-
 Ingest phase (run once, or on a schedule when your data changes):
 
 1. Fetch documents: load documentation, release notes, or other data sources
