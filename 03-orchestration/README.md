@@ -212,3 +212,221 @@ Then you make the final tweaks manually - adjusting the SQL query, setting your 
 If you're using an AI coding assistant (such as Claude or Cursor), Kestra's [agent-skills](https://github.com/kestra-io/agent-skills) repository gives your AI assistant the same grounding that AI Copilot has inside the UI — current plugin documentation, valid property names, and best practices. This means you can generate reliable, correct Kestra flows directly from your editor without switching to the Kestra UI.
 
 ---
+## Retrieval Augmented Generation
+
+AI Copilot solves the context problem for flow generation. But what about workflows that need to answer questions from your own data? That's where RAG comes in.
+
+### What is RAG?
+
+RAG (Retrieval Augmented Generation) is a technique that retrieves relevant information from your data sources, augments the AI prompt with that context, and generates a response grounded in real data. This solves the hallucination problem by ensuring the AI has access to current, accurate information at query time.
+
+### How RAG Works in Kestra
+
+RAG has two phases. In the demo flows below they run back-to-back, but in production you'd typically schedule them separately — ingest on a cadence, query on demand.
+
+```mermaid
+graph LR
+    subgraph Ingest ["Ingest (run once / on schedule)"]
+        A[Fetch Docs] --> B[Create Embeddings]
+        B --> C[Store in KV Store]
+    end
+    subgraph Query ["Query (run on demand)"]
+        D[User Question] --> E[Find Similar Content]
+        E --> F[Add Context to Prompt]
+        F --> G[LLM Answer]
+    end
+    C --> E
+```
+
+Ingest phase (run once, or on a schedule when your data changes):
+
+1. Fetch documents: load documentation, release notes, or other data sources
+2. Create embeddings: convert text into vectors using an embedding model
+3. Store embeddings: save vectors in Kestra's KV Store
+
+> Note: The flows store embeddings in Kestra's KV Store for simplicity. This is convenient for learning and small-scale demos, but it is not a replacement for a proper vector database. For any serious workload, e.g. larger document sets, low-latency retrieval, or production use, you should use a dedicated vector store. 
+
+Query phase (runs every time a question is asked):
+
+4. Retrieve context: find the embeddings most similar to the user's question
+5. Augment the prompt: add the retrieved content to the LLM prompt
+6. Generate response: the LLM answers using real, grounded context
+
+### Example: Kestra Release Features
+
+### Step 1: Without RAG
+
+Flow: [`1_chat_without_rag.yaml`](flows/1_chat_without_rag.yaml)
+
+This flow asks Gemini: "Which features were released in Kestra 1.1?"
+
+Without RAG, the model might hallucinate features that don't exist, provide outdated information, or give vague generic answers.
+
+Import and run this flow, then check the output — the response won't be accurate.
+
+### Step 2: With RAG
+
+Flow: [`2_chat_with_rag.yaml`](flows/2_chat_with_rag.yaml)
+
+This flow:
+
+1. Ingests the Kestra 1.1 release blog post from GitHub
+2. Creates embeddings using Gemini's embedding model
+3. Stores embeddings in Kestra's KV Store
+4. Asks the LLM the same question with RAG enabled
+5. Returns an accurate response with real features from that release
+
+Import and run `2_chat_with_rag.yaml` and compare the output quality against the previous flow.
+
+### Extending RAG with web search
+
+The examples above use static RAG — documents are ingested once and stored in the KV Store. Kestra also supports web search as a retriever, which fetches live results at query time and passes them as context to the LLM.
+
+Flow: [`3_rag_with_websearch.yaml`](flows/3_rag_with_websearch.yaml)
+
+The `TavilyWebSearch` retriever queries [Tavily](https://www.tavily.com/) and injects the results as context before the LLM generates a response — no ingestion step required. However, the results are only as good as the search engine, and may not be relevant or accurate. Always test the quality of retrieved context when using web search RAG.
+
+### Static RAG vs. web search RAG
+
+| | Static RAG | Web Search RAG |
+|---|---|---|
+| Data source | Documents you ingested | Live web results |
+| Best for | Internal docs, policies, fixed knowledge bases | Time-sensitive or frequently changing information |
+| Ingestion step | Required | Not required |
+| Example question | "What does our refund policy say?" | "What is the latest release of Kestra?" |
+
+Use static RAG when you control the source material. Use web search RAG when the answer depends on information that changes faster than you can re-ingest.
+
+## Best Practices
+
+1. Keep documents updated: re-ingest regularly so your KV Store reflects current information
+2. Chunk appropriately: break large documents into meaningful sections before ingesting
+3. Test retrieval quality: verify the right documents are being retrieved for your queries
+4. Choose the right retriever: static RAG for controlled knowledge bases, web search for live data
+
+---
+## AI Agents
+
+In Module 1 you built the agentic loop by hand: a `while` loop that called the LLM, executed any tool calls it returned, sent the results back, and stopped when the model produced a final answer with no more tool calls. That pattern is the foundation of every agent framework.
+
+In Kestra, the `AIAgent` plugin handles that loop for you. You define the goal, the tools, and optionally a system message - Kestra drives the loop, manages conversation history, and surfaces the result as a task output.
+
+Traditional Workflow — fixed sequence, predetermined logic:
+
+```yaml
+tasks:
+  - id: step1
+    type: Task1
+  - id: step2
+    type: Task2
+  - id: step3
+    type: Task3
+```
+
+AI Agent Workflow — agent decides what to do, in what order, based on the goal:
+
+```yaml
+tasks:
+  - id: agent
+    type: io.kestra.plugin.ai.agent.AIAgent
+    prompt: "Research data engineering trends and create a report"
+    tools:
+      - WebSearch
+      - TaskExecution
+```
+
+### When to Use AI Agents
+
+Use AI Agents when the exact sequence of steps isn't known in advance, decisions depend on dynamic changing information, or you need to adapt to unexpected conditions.
+
+Use traditional workflows when steps are deterministic and repeatable, compliance requires exact auditable processes, or cost and latency must be minimized.
+
+### Anatomy of an AI Agent
+
+```yaml
+id: example_agent
+namespace: zoomcamp
+
+tasks:
+  - id: agent
+    type: io.kestra.plugin.ai.agent.AIAgent
+
+    # Defines the agent's role and behavior
+    systemMessage: |
+      You are a data analyst. Analyze data and provide insights.
+
+    # The actual task or question
+    prompt: "What are the top 3 trends in this data?"
+
+    # LLM provider configuration
+    provider:
+      type: io.kestra.plugin.ai.provider.GoogleGemini
+      modelName: gemini-2.5-flash
+      apiKey: "{{ secret('GEMINI_API_KEY') }}"
+
+    # Tools the agent can use
+    tools:
+      - type: io.kestra.plugin.ai.tool.TavilyWebSearch
+        apiKey: "{{ secret('TAVILY_API_KEY') }}"
+
+    # Memory for context across executions
+    memory:
+      type: io.kestra.plugin.ai.memory.KestraKVStore
+      memoryId: analyst_001
+```
+
+## Simple Agent Example
+
+Flow: [`4_simple_agent.yaml`](flows/4_simple_agent.yaml)
+
+This flow demonstrates a basic AI agent that summarizes text with controllable length and language. It shows how to structure agent prompts, chain agent tasks, use `pluginDefaults` to avoid repetition, and track token usage for cost monitoring.
+
+## Web Research
+
+Flow: [`5_web_research_agent.yaml`](flows/5_web_research_agent.yaml)
+
+This flow demonstrates an agent with autonomous tool usage:
+
+1. Receives a research prompt (e.g., "Latest trends in workflow orchestration")
+2. Decides to use the web search tool to gather information
+3. Evaluates search results and determines if more searches are needed
+4. Synthesizes findings into a structured markdown report
+5. Saves the report to a file using the filesystem tool
+
+The agent autonomously decides when to use tools, can loop (search → evaluate → search again) until satisfied, and you only specify the goal — not the exact steps.
+
+## Agent Tools Available in Kestra
+
+| Tool | Purpose | Example Use |
+|------|---------|-------------|
+| `TavilyWebSearch` | Search the web for current information | Market research, news monitoring |
+| `GoogleCustomWebSearch` | Search with Google Custom Search API | Google search |
+| `CodeExecution` | Run code safely via Judge0 | Math calculations, data validation |
+| `KestraTask` | Execute any Kestra task | Run tasks based on 1000+ Kestra plugins |
+| `KestraFlow` | Trigger other Kestra flows | Call other flows for modularity |
+| `StreamableHttpMcpClient` | Use MCP servers via HTTP/SSE | Connect to remote MCP servers |
+| `DockerMcpClient` | Use MCP servers in Docker | MCP servers spun up on-demand via Docker |
+| `StdioMcpClient` | Use MCP servers via stdio | Integration with external systems |
+| `AIAgent` | Use another agent as a tool | Multi-agent systems, specialized sub-agents |
+
+## Agent Observability
+
+Kestra provides full observability for agent executions — token usage, tool executions, request and response logs, outputs, and execution time.
+
+Enable detailed logging via the `configuration` property:
+
+```yaml
+tasks:
+  - id: research_agent
+    type: io.kestra.plugin.ai.agent.AIAgent
+    description: Autonomous research agent with web search capabilities
+    provider:
+      type: io.kestra.plugin.ai.provider.GoogleGemini
+      apiKey: "{{ secret('GEMINI_API_KEY') }}"
+      modelName: gemini-2.5-flash
+    configuration:
+      logRequests: true
+      logResponses: true
+```
+---
+
