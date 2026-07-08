@@ -2,6 +2,7 @@ import time
 import json
 from tqdm.auto import tqdm
 from rag_helper import RAGBase
+import asyncio
 
 
 def calc_price(usage):
@@ -190,18 +191,31 @@ class RAGWithUsage(RAGBase):
 
 
 def map_progress(pool, seq, f):
-    results = []
-
-    with tqdm(total=len(seq)) as progress:
-        futures = []
-
-        for el in seq:
-            future = pool.submit(f, el)
-            future.add_done_callback(lambda p: progress.update())
-            futures.append(future)
-
-        for future in futures:
-            result = future.result()
-            results.append(result)
-
-    return results
+    """
+    Process items in parallel using asyncio for better efficiency.
+    This replaces the original thread-based implementation.
+    """
+    async def process_all():
+        results = []
+        
+        # Create async wrapper for the function
+        async def process_item(item):
+            # Run the synchronous function in a thread pool executor
+            # to avoid blocking the event loop
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(pool, f, item)
+        
+        # Create tasks for all items
+        tasks = [process_item(item) for item in seq]
+        
+        # Process with progress bar
+        with tqdm(total=len(seq), desc="Processing") as progress:
+            for task in asyncio.as_completed(tasks):
+                result = await task
+                results.append(result)
+                progress.update()
+        
+        return results
+    
+    # Run the async function
+    return asyncio.run(process_all())
