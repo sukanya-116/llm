@@ -198,6 +198,14 @@ If possible, use as fewer words as possible from the record.
 The output should resemble how people ask questions
 on the internet. Not too formal, not too short, not too long.
 """.strip()
+
+structured_instructions = data_gen_instructions + """
+Return ONLY a valid JSON object with the following structure:
+{
+    "questions": ["question1", "question2", "question3", "question4", "question5"]
+}
+Do not include any other text, markdown, or formatting outside the JSON.
+"""
 ```
 
 We ask the LLM to use different wording from the original document.
@@ -231,33 +239,25 @@ messages = [
 ]
 ```
 
-Until now we called `responses.create` and read `response.output_text`.
-For structured output we switch to `responses.parse` and pass
-`text_format=Questions`, which tells the API to return our class instead
-of free text.
-
 Call the model:
 
 ```python
-response = openai_client.responses.parse(
-    model="gpt-5.4-mini",
-    input=messages,
-    text_format=Questions
+response = groq_client.chat.completions.create(
+    model="openai/gpt-oss-120b",  
+    messages=messages,
+    response_format={"type": "json_object"},
+    temperature=0.7,
 )
 ```
 
-The parsed object is available in `response.output_parsed`:
+Parse the response
 
 ```python
-result = response.output_parsed
-
-print(result)
-```
-
-We can access the list directly:
-
-```python
-print(result.questions)
+import json
+result_text = response.choices[0].message.content
+result_data = json.loads(result_text)
+questions = result_data["questions"]
+questions
 ```
 
 You should see 5 questions that relate to the first FAQ document.
@@ -266,14 +266,13 @@ You should see 5 questions that relate to the first FAQ document.
 
 `evaluation_utils.py` contains helper functions we'll reuse in this module:
 
-- `llm_structured`: calls the OpenAI API with structured output
+- `llm_structured`: calls the Groq API with structured output
 - `llm_structured_retry`: retries structured-output calls when a
   request fails
 - `calc_price`: calculates the price from token usage
 - `calc_total_price`: calculates the total price from multiple usage
   objects
-- `map_progress`: runs work in parallel and tracks progress. We'll use it
-  in the next lesson.
+- `map_progress`: runs work in parallel and tracks progress.
 
 Import the structured-output helper:
 
@@ -285,8 +284,8 @@ Use it on the same document:
 
 ```python
 result, usage = llm_structured(
-    openai_client,
-    data_gen_instructions,
+    groq_client,
+    structured_instructions,
     user_prompt,
     Questions
 )
