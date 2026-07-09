@@ -8,8 +8,12 @@ import asyncio
 def calc_price(usage):
     # Groq pricing for openai/gpt-oss-120b
   
-    input_price_per_million = 0.15  
-    output_price_per_million = 0.60 
+    # input_price_per_million = 0.15  
+    # output_price_per_million = 0.60 
+
+    # Groq pricing for openai/gpt-oss-20b
+    input_price_per_million = 0.075
+    output_price_per_million = 0.30
 
     input_cost = (usage.input_tokens / 1_000_000) * input_price_per_million
     output_cost = (usage.output_tokens / 1_000_000) * output_price_per_million
@@ -32,7 +36,7 @@ def calc_total_price(usages):
     return total_cost
 
 
-def llm_structured(client, instructions, user_prompt, output_type, model="openai/gpt-oss-120b"):
+def llm_structured(client, instructions, user_prompt, output_type, model="openai/gpt-oss-20b"):
     """
     Groq version of structured LLM call.
     Uses JSON mode with schema enforcement via system prompt.
@@ -110,7 +114,7 @@ def llm_structured_retry(
     instructions,
     user_prompt,
     output_type,
-    model="openai/gpt-oss-120b",
+    model="openai/gpt-oss-20b",
     max_retries=3,
 ):
     for attempt in range(max_retries):
@@ -191,31 +195,18 @@ class RAGWithUsage(RAGBase):
 
 
 def map_progress(pool, seq, f):
-    """
-    Process items in parallel using asyncio for better efficiency.
-    This replaces the original thread-based implementation.
-    """
-    async def process_all():
-        results = []
-        
-        # Create async wrapper for the function
-        async def process_item(item):
-            # Run the synchronous function in a thread pool executor
-            # to avoid blocking the event loop
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(pool, f, item)
-        
-        # Create tasks for all items
-        tasks = [process_item(item) for item in seq]
-        
-        # Process with progress bar
-        with tqdm(total=len(seq), desc="Processing") as progress:
-            for task in asyncio.as_completed(tasks):
-                result = await task
-                results.append(result)
-                progress.update()
-        
-        return results
-    
-    # Run the async function
-    return asyncio.run(process_all())
+    results = []
+
+    with tqdm(total=len(seq)) as progress:
+        futures = []
+
+        for el in seq:
+            future = pool.submit(f, el)
+            future.add_done_callback(lambda p: progress.update())
+            futures.append(future)
+
+        for future in futures:
+            result = future.result()
+            results.append(result)
+
+    return results
